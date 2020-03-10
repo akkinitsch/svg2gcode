@@ -1,12 +1,14 @@
 #!/usr/bin/env python
 
+import argparse
+import math
 import sys
 import xml.etree.ElementTree as ET
 import shapes as shapes_pkg
 from shapes import point_generator
 from config import *
 
-def generate_gcode(filename, outputfile_name):
+def generate_gcode(filename, outputfile_name, use_printheight_placeholder=True):
     svg_shapes = set(['rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon', 'path'])
 
     tree = ET.parse(filename)
@@ -14,10 +16,13 @@ def generate_gcode(filename, outputfile_name):
     
     width = root.get('width')
     height = root.get('height')
+    traveled_way = 0
+    x_old = None
+    y_old = None
     if width == None or height == None:
         viewbox = root.get('viewBox')
         if viewbox:
-            _, _, width, height = viewbox.split()                
+            _, _, width, height = viewbox.split()
 
     if width == None or height == None:
         print "Unable to get width and height for the svg"
@@ -26,11 +31,16 @@ def generate_gcode(filename, outputfile_name):
     width = checkAndReturnMeasurementInMillimeter(width)
     height = checkAndReturnMeasurementInMillimeter(height)
 
-    #scale_x = bed_max_x / max(width, height)
-    #scale_y = bed_max_y / max(width, height)
-
     output_file = open(outputfile_name, "w")
     write_gcodeline(output_file, preamble)
+
+    shape_counter = 0
+    z_position_plotting = z_position_plotting_start
+
+    if use_printheight_placeholder:
+        gcode_line_zposition_plotting = "G1 Z%s" % (z_position_placeholder)
+    else:
+        gcode_line_zposition_plotting = "G1 Z%0.1f" % (z_position_plotting)
     
     for elem in root.iter():
         
@@ -50,19 +60,46 @@ def generate_gcode(filename, outputfile_name):
                 p = point_generator(d, m, smoothness)
                 move_to_startposition_shape_done = False
                 for x,y in p:
-                    #if x > 0 and x < bed_max_x and y > 0 and y < bed_max_y:  
-                    #    print "G1 X%0.1f Y%0.1f" % (scale_x*x, scale_y*y) 
-                    #print "G1 X%0.1f Y%0.1f" % (scale_x*x - bed_max_x/2.0, scale_y*y - bed_max_y/2.0)
-                    gcode_line ="G1 X%0.1f Y%0.1f" % (x - (bed_max_x/2.0), y - (bed_max_y/2.0))
-                    write_gcodeline(output_file, gcode_line)
+                    distance_from_previous_point = 0
+                    gcode_line = "G1 X%0.1f Y%0.1f" % (x, y)
+                    if x_old and y_old and move_to_startposition_shape_done:
+                        distance_from_previous_point = calculateDistance(x_old, y_old, x, y)
+                        if distance_from_previous_point > 3:
+                            write_gcodeline(output_file, "G1 Z%s" % (z_movement_placeholder))
+                            write_gcodeline(output_file, gcode_line, traveled_way, elem.attrib["id"],
+                                            distance_from_previous_point)
+                            write_gcodeline(output_file, gcode_line_zposition_plotting)
+                        else:
+                            traveled_way = traveled_way + distance_from_previous_point
+                            write_gcodeline(output_file, gcode_line, traveled_way, elem.attrib["id"], distance_from_previous_point)
+                    x_old = x
+                    y_old = y
+
                     if not move_to_startposition_shape_done:
-                        gcode_line_zposition_plotting = "G1 Z%0.1f" %(z_position_plotting)
                         write_gcodeline(output_file, gcode_line_zposition_plotting)
                         move_to_startposition_shape_done = True
 
+                if use_printheight_placeholder:
+                    write_gcodeline(output_file, "G1 Z%s" % (z_movement_placeholder))
                 write_gcodeline(output_file, shape_postamble)
 
+                if not use_printheight_placeholder:
+                    shape_counter = shape_counter + 1
+                    if shape_counter % z_correction_every_nth_shape == 0:
+                        z_position_plotting = z_position_plotting - retract_pencil
+                        if z_position_plotting < 0.4:
+                            pause_printer_for_pencil_retraction()
+                            gcode_line_zposition_plotting = "G1 Z%0.1f" % (z_position_plotting_start)
+                            write_gcodeline(output_file, gcode_line_zposition_plotting)
+                            write_gcodeline(output_file, "M25")
+                            z_position_plotting = z_position_plotting_start
+
     write_gcodeline(output_file, postamble)
+
+
+def calculateDistance(x1, y1, x2, y2):
+    dist = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+    return dist
 
 def checkAndReturnMeasurementInMillimeter(value):
     if not value[-2:] == "mm":
@@ -72,12 +109,22 @@ def checkAndReturnMeasurementInMillimeter(value):
         result = value.split("mm")
         return float(result[0])
 
-def write_gcodeline(outputfile, line, consoleprint=True):
-    outputfile.write(line + "\n")
+def write_gcodeline(outputfile, line, plotted_way=0.0, elementID="", distance_from_previous_point=0, consoleprint=True):
+    outputfile.write(line + " ; " + str(plotted_way) + " ; " + elementID + " ; " + str(distance_from_previous_point) + "\n")
     if consoleprint:
         print line
 
+def pause_printer_for_pencil_retraction():
+    pass#write_gcodeline(output_file, "G1 Z%0.1f\nM25" %(z_position_plotting))
+
+def resume_printjob():
+    pass
+
 if __name__ == "__main__":
-    generate_gcode("test.svg", "test.gcode")
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--input', dest='input')
+    parser.add_argument('--output', dest='output')
+    args = parser.parse_args()
+    generate_gcode(args.input, args.output)
 
 
